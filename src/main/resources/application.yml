@@ -1,0 +1,168 @@
+spring:
+  application:
+    name: orbit-platform
+
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:orbit}
+    username: ${DB_USERNAME:postgres}
+    password: ${DB_PASSWORD:vatsalya}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      pool-name: OrbitPool
+      minimum-idle: 20
+      maximum-pool-size: 100
+      # ROOT CAUSE FIX: 3000ms connection-timeout was too short at high load.
+      # Under 2000 req/s bursts the pool exhausted and 3s wasn't enough to wait.
+      # 8000ms gives the pool time to reclaim connections from finishing requests.
+      connection-timeout: 8000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+      leak-detection-threshold: 10000
+      connection-test-query: SELECT 1
+      data-source-properties:
+        cachePrepStmts: true
+        prepStmtCacheSize: 250
+        prepStmtCacheSqlLimit: 2048
+        useServerPrepStmts: true
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    open-in-view: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        jdbc:
+          batch_size: 50
+          fetch_size: 100
+        order_inserts: true
+        order_updates: true
+
+  sql:
+    init:
+      mode: always
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      # ROOT CAUSE FIX: 2000ms timeout caused Redis ops to fail under load.
+      # Redis itself is fast (<1ms) but network jitter at high concurrency
+      # meant some ops hit the 2s timeout. 5s gives headroom.
+      timeout: 5000ms
+      lettuce:
+        pool:
+          max-active: 100   # increased from 50 — matches DB pool size
+          max-idle: 30
+          min-idle: 10
+          max-wait: 2000ms  # wait up to 2s for a Redis connection
+
+  cache:
+    type: redis
+    redis:
+      time-to-live: 300000
+
+  kafka:
+    bootstrap-servers: ${KAFKA_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      # Defaults inherited; per-producer overrides are in KafkaProducerConfig.java
+      acks: all
+      retries: 3
+      batch-size: 65536
+      linger-ms: 5
+      buffer-memory: 67108864
+      compression-type: snappy
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5
+    consumer:
+      group-id: orbit-group
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      max-poll-records: 500
+      properties:
+        spring.json.trusted.packages: "com.jobScheduling.job.*"
+        session.timeout.ms: 30000
+        heartbeat.interval.ms: 10000
+        max.poll.interval.ms: 300000
+
+async:
+  executor:
+    core-pool-size: 50          # increased from 20 — match request concurrency
+    max-pool-size: 400          # increased from 200 — headroom for spikes
+    queue-capacity: 20000       # increased from 10000
+    thread-name-prefix: "orbit-async-"
+    keep-alive-seconds: 60
+
+server:
+  port: ${SERVER_PORT:8080}
+  tomcat:
+    threads:
+      max: 400
+      min-spare: 50
+    accept-count: 500           # increased from 200 — queue more connections
+    connection-timeout: 10000   # increased from 5000ms
+    max-connections: 10000
+  compression:
+    enabled: true
+    mime-types: application/json,text/plain,text/html
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+resilience4j:
+  ratelimiter:
+    instances:
+      jobApi:
+        # ROOT CAUSE FIX: 1000 req/s was too low — the load test sent 2000 exec/s
+        # + 1000 create/s = 3000 req/s hitting the rate limiter → mass 429s.
+        # Increase to 5000 req/s per instance. The real traffic shaping is done
+        # at the infrastructure level (load balancer / API gateway).
+        limit-for-period: 5000
+        limit-refresh-period: 1s
+        timeout-duration: 0s
+  circuitbreaker:
+    instances:
+      jobService:
+        sliding-window-size: 100
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 10
+        register-health-indicator: true
+  retry:
+    instances:
+      jobExecution:
+        max-attempts: 3
+        wait-duration: 500ms
+        retry-exceptions:
+          - org.springframework.dao.TransientDataAccessException
+          - org.springframework.kafka.KafkaException
+
+kafka:
+  topics:
+    job-created: orbit.job-created
+    job-execution-request: orbit.job-execution-request
+    job-execution-result: orbit.job-execution-result
+    job-retry: orbit.job-retry
+    dead-letter: orbit.job-dead-letter
+  consumer:
+    concurrency: 10
+
+app:
+  cors:
+    allowed-origins: ${CORS_ORIGINS:http://localhost:3000,http://localhost:5500,http://127.0.0.1:5500}

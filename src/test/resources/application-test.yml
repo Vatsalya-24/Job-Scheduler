@@ -1,0 +1,55 @@
+# Test profile — overrides that make tests fast and hermetic
+
+spring:
+  # Use in-memory H2 for unit tests (integration tests use Testcontainers)
+  datasource:
+    url: jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1;MODE=PostgreSQL
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    database-platform: org.hibernate.dialect.H2Dialect
+  sql:
+    init:
+      mode: never  # Schema handled by Hibernate ddl-auto in tests
+
+  # Disable Redis auto-config for unit tests
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.redis.RedisRepositoriesAutoConfiguration
+      - org.springframework.boot.autoconfigure.cache.CacheAutoConfiguration
+
+  # Kafka bootstrap handled by @EmbeddedKafka in integration tests
+  kafka:
+    bootstrap-servers: ${spring.embedded.kafka.brokers:localhost:9092}
+    consumer:
+      auto-offset-reset: earliest
+
+# Disable scheduler in tests to avoid timing issues
+scheduler:
+  enabled: false
+
+# Disable circuit breakers in tests
+resilience4j:
+  circuitbreaker:
+    instances:
+      jobService:
+        sliding-window-size: 10
+        failure-rate-threshold: 100  # Effectively disabled
+
+# Fast rate limiter for tests
+  ratelimiter:
+    instances:
+      jobApi:
+        limit-for-period: 10000
+        limit-refresh-period: 1s
+        timeout-duration: 0s
+
+logging:
+  level:
+    com.jobScheduling: DEBUG
+    org.springframework.kafka: WARN
+    org.hibernate.SQL: DEBUG

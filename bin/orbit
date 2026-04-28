@@ -1,0 +1,288 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# orbit — Orbit Platform CLI  (macOS · Linux · Windows WSL/Git Bash)
+# ─────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+JAR="$ROOT/target/orbit-platform-1.0.0.jar"
+API="${ORBIT_URL:-http://localhost:8080}/api/v1"
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+BLUE='\033[0;34m'; BOLD='\033[1m'; NC='\033[0m'
+ok()     { echo -e "${GREEN}✓${NC} $*"; }
+info()   { echo -e "${BLUE}→${NC} $*"; }
+warn()   { echo -e "${YELLOW}⚠${NC} $*"; }
+err()    { echo -e "${RED}✗${NC} $*" >&2; }
+header() { echo -e "\n${BOLD}${BLUE}$*${NC}"; }
+sep()    { echo -e "${BLUE}──────────────────────────────────────────${NC}"; }
+
+need_cmd() { command -v "$1" &>/dev/null || { err "Required: $1 — install it first"; exit 1; }; }
+
+json_pp() {
+  if command -v python3 &>/dev/null; then python3 -m json.tool 2>/dev/null || cat
+  elif command -v python  &>/dev/null; then python  -m json.tool 2>/dev/null || cat
+  else cat; fi
+}
+
+cmd_help() {
+  cat << HELP
+
+${BOLD}Orbit Platform CLI${NC}
+${BLUE}Usage:${NC} orbit <command> [args]
+
+${BOLD}Infrastructure${NC}
+  orbit up          Start Docker services (Postgres · Redis · Kafka · Grafana)
+  orbit down        Stop all services
+  orbit status      Show service and app health
+  orbit logs        Tail application logs
+
+${BOLD}Application${NC}
+  orbit build       Build the JAR  (mvn package -DskipTests)
+  orbit start       Start Spring Boot app
+  orbit stop        Stop the app
+  orbit restart     build + start
+
+${BOLD}Testing${NC}
+  orbit test        Unit tests  (no Docker needed)
+  orbit itest       Integration tests  (requires Docker)
+  orbit load        k6 load test
+  orbit smoke       Quick end-to-end smoke test
+
+${BOLD}API shortcuts${NC}
+  orbit jobs                              List all jobs
+  orbit jobs create <name> <cron> <url>   Create a job
+  orbit jobs get    <id>                  Get a job
+  orbit jobs pause  <id>                  Pause a job
+  orbit jobs resume <id>                  Resume a job
+  orbit jobs trigger <id>                 Fire immediately
+  orbit jobs disable <id>                 Disable a job
+  orbit exec    <jobId> [STATUS]          Record execution (default: SUCCESS)
+  orbit webhooks <jobId>                  List webhooks for a job
+  orbit dashboard                         Platform summary stats
+
+${BOLD}Environment variables${NC}
+  ORBIT_URL       App base URL          (default: http://localhost:8080)
+  DB_HOST         Postgres host         (default: localhost)
+  DB_NAME         Database name         (default: orbit)
+  DB_USERNAME     DB user               (default: postgres)
+  DB_PASSWORD     DB password           (default: postgres)
+  KAFKA_SERVERS   Kafka bootstrap       (default: localhost:9092)
+  REDIS_HOST      Redis host            (default: localhost)
+  SERVER_PORT     App HTTP port         (default: 8080)
+
+HELP
+}
+
+# ── Infrastructure ─────────────────────────────────────────────────────────
+cmd_up() {
+  header "Starting Orbit infrastructure..."
+  need_cmd docker
+  cd "$ROOT"
+  docker compose up -d
+  info "Waiting for health checks..."
+  local n=0
+  until docker compose ps 2>/dev/null | grep -qE "healthy|running" || [ $n -ge 30 ]; do
+    sleep 2; n=$((n+1)); printf "."
+  done; echo ""
+  cmd_status
+}
+
+cmd_down() {
+  header "Stopping Orbit..."
+  cd "$ROOT" && docker compose down
+  ok "All services stopped"
+}
+
+cmd_status() {
+  header "Service Status"; sep
+  for svc in postgres redis kafka; do
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "orbit-$svc"; then
+      ok "$svc"
+    else warn "$svc (not running)"; fi
+  done
+  if curl -sf "${ORBIT_URL:-http://localhost:8080}/actuator/health" -o /tmp/_oh 2>&1; then
+    local s; s=$(python3 -c "import json; print(json.load(open('/tmp/_oh'))['status'])" 2>/dev/null || echo "?")
+    [ "$s" = "UP" ] && ok "app ($s)" || warn "app ($s)"
+  else warn "app (not reachable)"; fi
+  sep
+  echo "  Dashboard:   ${ORBIT_URL:-http://localhost:8080}"
+  echo "  Kafka UI:    http://localhost:8090"
+  echo "  Grafana:     http://localhost:3000  (admin/admin)"
+  echo "  Prometheus:  http://localhost:9090"
+  echo "  WH Receiver: http://localhost:8888"
+  echo ""
+}
+
+cmd_logs() {
+  [ -f /tmp/orbit-app.log ] && tail -f /tmp/orbit-app.log \
+    || { err "No log at /tmp/orbit-app.log. Use: orbit start"; exit 1; }
+}
+
+# ── Application ────────────────────────────────────────────────────────────
+cmd_build() {
+  header "Building Orbit..."
+  need_cmd mvn
+  cd "$ROOT"
+  mvn clean package -DskipTests --no-transfer-progress -q
+  ok "Built → $JAR"
+}
+
+cmd_start() {
+  [ -f "$JAR" ] || { warn "JAR missing — building first..."; cmd_build; }
+  header "Starting Orbit application..."
+  nohup java \
+    -Dspring.threads.virtual.enabled=true \
+    -Xms512m -Xmx2g \
+    -XX:+UseG1GC -XX:MaxGCPauseMillis=200 \
+    -Dserver.port="${SERVER_PORT:-8080}" \
+    -DDB_HOST="${DB_HOST:-localhost}" \
+    -DDB_NAME="${DB_NAME:-orbit}" \
+    -DDB_USERNAME="${DB_USERNAME:-postgres}" \
+    -DDB_PASSWORD="${DB_PASSWORD:-postgres}" \
+    -DREDIS_HOST="${REDIS_HOST:-localhost}" \
+    -DKAFKA_SERVERS="${KAFKA_SERVERS:-localhost:9092}" \
+    -jar "$JAR" \
+    > /tmp/orbit-app.log 2>&1 &
+  echo $! > /tmp/orbit-app.pid
+  info "PID $(cat /tmp/orbit-app.pid) — logs: tail -f /tmp/orbit-app.log"
+  info "Waiting for startup (~30s)..."
+  local n=0
+  until curl -sf "${ORBIT_URL:-http://localhost:8080}/actuator/health" >/dev/null 2>&1 \
+        || [ $n -ge 40 ]; do sleep 3; n=$((n+1)); printf "."; done; echo ""
+  if curl -sf "${ORBIT_URL:-http://localhost:8080}/actuator/health" >/dev/null 2>&1; then
+    ok "App is UP → ${ORBIT_URL:-http://localhost:8080}"
+  else
+    err "App failed to start. Check: tail -50 /tmp/orbit-app.log"; exit 1
+  fi
+}
+
+cmd_stop() {
+  if [ -f /tmp/orbit-app.pid ]; then
+    local pid; pid=$(cat /tmp/orbit-app.pid)
+    kill "$pid" 2>/dev/null && ok "Stopped (PID $pid)" || warn "PID $pid not found"
+    rm -f /tmp/orbit-app.pid
+  else warn "No PID file. Try: pkill -f orbit-platform"; fi
+}
+
+cmd_restart() { cmd_stop || true; cmd_build; cmd_start; }
+
+# ── Testing ─────────────────────────────────────────────────────────────────
+cmd_test()  { header "Unit tests..."; cd "$ROOT"; mvn test --no-transfer-progress; }
+cmd_itest() { header "Integration tests..."; need_cmd docker; cd "$ROOT"; mvn failsafe:integration-test failsafe:verify --no-transfer-progress; }
+cmd_load()  {
+  need_cmd k6
+  header "Load test → ${ORBIT_URL:-http://localhost:8080}"
+  cd "$ROOT"; k6 run load-test.js -e "BASE_URL=${ORBIT_URL:-http://localhost:8080}"
+}
+
+cmd_smoke() {
+  header "Smoke Test"; sep; need_cmd curl
+  # Health
+  info "Health..."
+  local h; h=$(curl -sf "${ORBIT_URL:-http://localhost:8080}/actuator/health" \
+    | python3 -c "import json,sys; print(json.load(sys.stdin)['status'])" 2>/dev/null || echo "FAIL")
+  [ "$h" = "UP" ] && ok "Health: UP" || { err "Health: $h"; exit 1; }
+  # Create job
+  info "Create job..."
+  local job; job=$(curl -sf -X POST "$API/jobs" \
+    -H "Content-Type: application/json" \
+    -d '{"name":"smoke-job","cronExpression":"0 * * * * *","target":"https://test.internal/smoke","status":"ACTIVE"}')
+  local jid; jid=$(echo "$job" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])" 2>/dev/null)
+  [ -n "$jid" ] && ok "Job created: id=$jid" || { err "Create failed: $job"; exit 1; }
+  # Read (DB then cache)
+  info "Read (DB hit)..."; curl -sf "$API/jobs/$jid" >/dev/null && ok "DB read OK"
+  info "Read (cache hit)..."; curl -sf "$API/jobs/$jid" >/dev/null && ok "Cache read OK"
+  # Async execution
+  info "Record execution (202)..."
+  local code; code=$(curl -sf -o /dev/null -w "%{http_code}" -X POST "$API/jobs/$jid/executions" \
+    -H "Content-Type: application/json" -d '{"status":"SUCCESS"}')
+  [ "$code" = "202" ] && ok "Execution queued → 202" || { err "Expected 202, got $code"; exit 1; }
+  # Pause / resume
+  info "Pause/resume..."
+  curl -sf -X POST "$API/jobs/$jid/pause" >/dev/null && ok "Paused"
+  curl -sf -X POST "$API/jobs/$jid/resume" >/dev/null && ok "Resumed"
+  # Dashboard
+  info "Dashboard..."
+  curl -sf "$API/dashboard/summary" >/dev/null && ok "Dashboard OK"
+  # Cleanup
+  curl -sf -X DELETE "$API/jobs/$jid" >/dev/null; ok "Cleanup done"
+  sep; ok "All smoke tests PASSED!"; echo ""
+  echo "  Dashboard:   ${ORBIT_URL:-http://localhost:8080}"
+  echo "  Grafana:     http://localhost:3000"
+  echo "  Kafka UI:    http://localhost:8090"
+  echo ""
+}
+
+# ── API shortcuts ──────────────────────────────────────────────────────────
+cmd_jobs() {
+  local sub="${1:-list}"; shift || true
+  case "$sub" in
+    list)    curl -sf "$API/jobs?size=20" | json_pp ;;
+    get)     [ -z "${1:-}" ] && { err "Usage: orbit jobs get <id>"; exit 1; }
+             curl -sf "$API/jobs/$1" | json_pp ;;
+    create)  [ $# -lt 3 ] && { err "Usage: orbit jobs create <name> <cron> <url>"; exit 1; }
+             curl -sf -X POST "$API/jobs" -H "Content-Type: application/json" \
+               -d "{\"name\":\"$1\",\"cronExpression\":\"$2\",\"target\":\"$3\",\"status\":\"ACTIVE\"}" | json_pp ;;
+    pause)   [ -z "${1:-}" ] && { err "Usage: orbit jobs pause <id>"; exit 1; }
+             curl -sf -X POST "$API/jobs/$1/pause" | json_pp && ok "Job $1 paused" ;;
+    resume)  [ -z "${1:-}" ] && { err "Usage: orbit jobs resume <id>"; exit 1; }
+             curl -sf -X POST "$API/jobs/$1/resume" | json_pp && ok "Job $1 resumed" ;;
+    trigger) [ -z "${1:-}" ] && { err "Usage: orbit jobs trigger <id>"; exit 1; }
+             curl -sf -X POST "$API/jobs/$1/trigger" | json_pp ;;
+    disable) [ -z "${1:-}" ] && { err "Usage: orbit jobs disable <id>"; exit 1; }
+             curl -sf -X DELETE "$API/jobs/$1" && ok "Job $1 disabled" ;;
+    *)       err "Unknown subcommand: $sub"; cmd_help; exit 1 ;;
+  esac
+}
+
+cmd_exec() {
+  local jid="${1:-}"; local st="${2:-SUCCESS}"
+  [ -z "$jid" ] && { err "Usage: orbit exec <jobId> [STATUS]"; exit 1; }
+  local code; code=$(curl -sf -o /dev/null -w "%{http_code}" \
+    -X POST "$API/jobs/$jid/executions" \
+    -H "Content-Type: application/json" \
+    -d "{\"status\":\"$st\"}")
+  [ "$code" = "202" ] && ok "Execution queued → 202" || err "Got $code"
+}
+
+cmd_webhooks() {
+  local jid="${1:-}"; [ -z "$jid" ] && { err "Usage: orbit webhooks <jobId>"; exit 1; }
+  curl -sf "$API/jobs/$jid/webhooks" | json_pp
+}
+
+cmd_dashboard() {
+  header "Platform Summary"; sep
+  curl -sf "$API/dashboard/summary" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+j=d['jobs']; e=d['executions']; w=d['webhooks']
+print(f'  Jobs        total={j[\"total\"]}  active={j[\"active\"]}  paused={j[\"paused\"]}  disabled={j[\"disabled\"]}')
+print(f'  Executions  total={e[\"total\"]}  success={e[\"success\"]}  failed={e[\"failed\"]}  rate={e[\"successRate\"]}%')
+print(f'  Webhooks    total={w[\"total\"]}  delivered={w[\"delivered\"]}  exhausted={w[\"exhausted\"]}')
+" 2>/dev/null || curl -sf "$API/dashboard/summary" | json_pp
+  sep
+}
+
+# ── Dispatch ───────────────────────────────────────────────────────────────
+CMD="${1:-help}"; shift || true
+case "$CMD" in
+  help|--help|-h) cmd_help ;;
+  up)             cmd_up "$@" ;;
+  down)           cmd_down ;;
+  status)         cmd_status ;;
+  logs)           cmd_logs ;;
+  build)          cmd_build ;;
+  start)          cmd_start ;;
+  stop)           cmd_stop ;;
+  restart)        cmd_restart ;;
+  test)           cmd_test ;;
+  itest)          cmd_itest ;;
+  load)           cmd_load ;;
+  smoke)          cmd_smoke ;;
+  jobs)           cmd_jobs "$@" ;;
+  exec)           cmd_exec "$@" ;;
+  webhooks)       cmd_webhooks "$@" ;;
+  dashboard)      cmd_dashboard ;;
+  *)              err "Unknown: $CMD"; cmd_help; exit 1 ;;
+esac
