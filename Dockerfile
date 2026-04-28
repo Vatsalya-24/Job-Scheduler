@@ -1,29 +1,36 @@
-# ── Stage 1: Build ────────────────────────────────────────────────────────────
-FROM eclipse-temurin:21-jdk-alpine AS builder
+# ── Stage 1: Build ─────────────────────────────────────────
+FROM maven:3.9.6-eclipse-temurin-21-alpine AS builder
+
 WORKDIR /build
 
-# Copy pom and download dependencies first (layer cache)
+# Copy pom first for dependency caching
+# Copy pom first for dependency caching
 COPY pom.xml .
+
 RUN --mount=type=cache,target=/root/.m2 \
     mvn dependency:resolve --no-transfer-progress -f pom.xml || true
 
+# Copy source
 COPY src ./src
+
 RUN --mount=type=cache,target=/root/.m2 \
     mvn clean package -DskipTests --no-transfer-progress
 
-# Extract layers for efficient layer caching
+# Extract Spring Boot layers
 RUN java -Djarmode=layertools \
     -jar target/orbit-platform-*.jar extract --destination extracted
 
-# ── Stage 2: Runtime ────────────────────────────────────────────────────────────
+
+# ── Stage 2: Runtime ───────────────────────────────────────
 FROM eclipse-temurin:21-jre-alpine AS runtime
+
 WORKDIR /app
 
-# Non-root user for security
+# Non-root user
 RUN addgroup -S orbit && adduser -S orbit -G orbit
 USER orbit
 
-# Copy extracted layers (changes least → most frequently)
+# Copy extracted layers
 COPY --from=builder /build/extracted/dependencies/          ./
 COPY --from=builder /build/extracted/spring-boot-loader/    ./
 COPY --from=builder /build/extracted/snapshot-dependencies/ ./
@@ -35,7 +42,6 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
 
 EXPOSE 8080
 
-# Virtual threads + tuned GC
 ENTRYPOINT ["java", \
     "-Dspring.threads.virtual.enabled=true", \
     "-XX:+UseG1GC", \
