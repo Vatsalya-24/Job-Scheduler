@@ -1,0 +1,123 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# render.yaml — Orbit Platform deployment configuration
+#
+# This file tells Render exactly how to build and deploy the application.
+# Commit this file to your GitHub repo root and connect it to Render.
+#
+# BEFORE DEPLOYING:
+#   1. Create an Upstash Kafka account at https://upstash.com/kafka
+#   2. Create a Kafka cluster and note the bootstrap URL, username, password
+#   3. In Render Dashboard → Environment → set env vars listed below
+#
+# HOW TO DEPLOY:
+#   1. Push this repo to GitHub
+#   2. Go to https://render.com → New → Blueprint
+#   3. Select your GitHub repo → Render finds this render.yaml automatically
+#   4. Add the secret env vars (marked SECRET below) in the Render dashboard
+#   5. Click Deploy
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Spring Boot Web Service ──────────────────────────────────────────────
+  - type: web
+    name: orbit-platform
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter           # 512MB RAM, 0.5 CPU — upgrade to 'standard' for production
+
+    # Health check — Render waits for this before routing traffic
+    healthCheckPath: /actuator/health
+
+    # Auto-deploy on every push to main branch
+    autoDeploy: true
+    branch: main
+
+    envVars:
+      # ── Server ─────────────────────────────────────────────────────────
+      # PORT is automatically set by Render — do NOT set it manually
+      - key: SPRING_PROFILES_ACTIVE
+        value: prod
+
+      # ── Database ────────────────────────────────────────────────────────
+      # Render PostgreSQL — fromDatabase links to the DB defined below
+      - key: DATABASE_URL
+        fromDatabase:
+          name: orbit-db
+          property: connectionString
+
+      # ── Redis ───────────────────────────────────────────────────────────
+      # Option A: Render Redis (add below in databases section)
+      - key: REDIS_URL
+        fromService:
+          name: orbit-redis
+          type: redis
+          property: connectionString
+
+      # ── Kafka (Upstash) ─────────────────────────────────────────────────
+      # Get these from https://console.upstash.com/kafka → your cluster → Details
+      # Set them as Secret environment variables in the Render dashboard
+      - key: KAFKA_SERVERS
+        sync: false          # secret — set manually in Render dashboard
+      - key: KAFKA_SECURITY_PROTOCOL
+        value: SASL_SSL      # Upstash always uses SASL_SSL
+      - key: KAFKA_SASL_MECHANISM
+        value: SCRAM-SHA-256 # Upstash uses SCRAM-SHA-256
+      - key: KAFKA_SASL_JAAS
+        sync: false          # secret — set manually in Render dashboard
+        # format: org.apache.kafka.common.security.scram.ScramLoginModule required username="YOUR_USER" password="YOUR_PASS";
+
+      # ── JVM Tuning ──────────────────────────────────────────────────────
+      # -XX:MaxRAMPercentage=75.0 is set in Dockerfile ENTRYPOINT
+      # These control application-level thread pools
+      - key: ASYNC_CORE_POOL
+        value: "5"
+      - key: ASYNC_MAX_POOL
+        value: "20"
+      - key: TOMCAT_MAX_THREADS
+        value: "50"
+
+      # ── DB Pool ─────────────────────────────────────────────────────────
+      # Render starter Postgres: 25 connection limit
+      # Keep pool at 5 — leave connections for admin/migrations
+      - key: DB_POOL_SIZE
+        value: "5"
+
+      # ── Kafka topic partitions ───────────────────────────────────────────
+      # Upstash free: 10 partitions total across all topics
+      # With 5 topics × 1 partition each = 5 partitions (safe for free tier)
+      - key: KAFKA_PARTITIONS
+        value: "1"
+      - key: KAFKA_CONSUMER_CONCURRENCY
+        value: "1"
+
+      # ── Hibernate DDL ────────────────────────────────────────────────────
+      # 'update' on first deploy (creates tables), then change to 'validate'
+      - key: DDL_AUTO
+        value: update
+
+      # ── CORS ────────────────────────────────────────────────────────────
+      # Set to your frontend URL after deploying
+      - key: CORS_ORIGINS
+        value: https://orbit-platform.onrender.com
+
+      # ── Kafka Health ────────────────────────────────────────────────────
+      - key: KAFKA_HEALTH_ENABLED
+        value: "true"
+
+  # ── Redis ────────────────────────────────────────────────────────────────
+  - type: redis
+    name: orbit-redis
+    plan: starter           # 25MB free tier — enough for caching
+    maxmemoryPolicy: allkeys-lru
+    ipAllowList: []         # only accessible from within Render
+
+databases:
+
+  # ── PostgreSQL ───────────────────────────────────────────────────────────
+  - name: orbit-db
+    plan: starter           # 1GB storage, 25 connections
+    databaseName: orbit
+    user: orbit_user
+    postgresMajorVersion: "16"
+    ipAllowList: []         # only accessible from within Render

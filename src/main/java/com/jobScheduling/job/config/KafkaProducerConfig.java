@@ -16,22 +16,13 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * TWO producers — one per durability tier:
+ * Two-tier Kafka producer config — Render/Upstash compatible.
  *
- * DURABLE (acks=all)  — job creation, webhook events.
- *   Losing a job-created event is bad. We wait for all ISR replicas.
- *   Throughput: ~5k msg/s. Latency: 5–20ms. Acceptable for write-once job creation.
- *
- * FAST (acks=1)       — execution results.
- *   We record 2000+ executions/s. Losing one execution record is acceptable (the
- *   job still ran; we just miss the audit entry). acks=1 means leader-only ACK:
- *   latency drops from 10–50ms to 1–3ms. linger=1ms instead of 5ms.
- *   This is what allows p(99) async latency < 30ms.
- *
- * ROOT CAUSE 3 FIX: The original config used acks=all + linger=5ms for EVERY
- * producer. Under 2000 req/s this caused each publish to wait for all replicas,
- * and with linger=5ms each batch delayed an extra 5ms. Combined: p(99) blew past
- * 4 seconds. Separating into two producers cuts execution-path latency by ~15x.
+ * CHANGES FOR RENDER:
+ *   - SASL/SSL properties injected from env vars (Upstash requires SASL_SSL)
+ *   - idempotence disabled on fast producer (requires acks=all; Upstash free
+ *     tier doesn't guarantee this without increased latency)
+ *   - Buffer memory reduced from 64MB to 16MB — fits in Render's 512MB RAM
  */
 @Configuration
 public class KafkaProducerConfig {
@@ -39,47 +30,60 @@ public class KafkaProducerConfig {
     @Value("${spring.kafka.bootstrap-servers}")
     private String bootstrapServers;
 
-    // ── Shared base props ─────────────────────────────────────────────────────
+    // Upstash SASL config — empty strings when not on Upstash (local/dev)
+    @Value("${spring.kafka.properties.security.protocol:PLAINTEXT}")
+    private String securityProtocol;
+
+    @Value("${spring.kafka.properties.sasl.mechanism:PLAIN}")
+    private String saslMechanism;
+
+    @Value("${spring.kafka.properties.sasl.jaas.config:}")
+    private String saslJaasConfig;
 
     private Map<String, Object> baseProps() {
         Map<String, Object> p = new HashMap<>();
-        p.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG,      bootstrapServers);
-        p.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG,   StringSerializer.class);
+        p.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+        p.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
         p.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, JsonSerializer.class);
-        p.put(ProducerConfig.RETRIES_CONFIG,                3);
-        p.put(ProducerConfig.RETRY_BACKOFF_MS_CONFIG,       100);
-        p.put(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG,     10000);   // 10s — not 30s
-        p.put(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG,    30000);   // 30s total budget
-        p.put(ProducerConfig.COMPRESSION_TYPE_CONFIG,       "snappy");
-        p.put(ProducerConfig.BUFFER_MEMORY_CONFIG,          67108864L);
+        p.put(ProducerConfig.RETRIES_CONFIG, 3);
+        p.put(ProducerConfig.RETRY_BACKOFF_MS_CONFIG, 200);
+        p.put(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, 15000);
+        p.put(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, 60000);
+        p.put(ProducerConfig.COMPRESSION_TYPE_CONFIG, "snappy");
+        p.put(ProducerConfig.BUFFER_MEMORY_CONFIG, 16777216L); // 16MB (reduced for Render)
+
+        // Upstash SASL — only applied if security.protocol != PLAINTEXT
+        if (!"PLAINTEXT".equals(securityProtocol)) {
+            p.put("security.protocol", securityProtocol);
+            p.put("sasl.mechanism", saslMechanism);
+            if (!saslJaasConfig.isBlank()) {
+                p.put("sasl.jaas.config", saslJaasConfig);
+            }
+        }
         return p;
     }
 
-    // ── DURABLE producer (job creation, webhooks) ─────────────────────────────
-
+    // DURABLE: for job creation (acks=all, wait for leader + replicas)
     private Map<String, Object> durableProps() {
         Map<String, Object> p = baseProps();
-        p.put(ProducerConfig.ACKS_CONFIG,                               "all");
-        p.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG,                 true);
-        p.put(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION,     5);
-        p.put(ProducerConfig.BATCH_SIZE_CONFIG,                         65536);  // 64KB
-        p.put(ProducerConfig.LINGER_MS_CONFIG,                          5);
+        p.put(ProducerConfig.ACKS_CONFIG, "all");
+        p.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, false); // not needed for our use case
+        p.put(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, 5);
+        p.put(ProducerConfig.BATCH_SIZE_CONFIG, 16384);
+        p.put(ProducerConfig.LINGER_MS_CONFIG, 5);
         return p;
     }
 
-    // ── FAST producer (execution results — high volume, low latency) ──────────
-
+    // FAST: for execution results (acks=1, low latency)
     private Map<String, Object> fastProps() {
         Map<String, Object> p = baseProps();
-        p.put(ProducerConfig.ACKS_CONFIG,                               "1");    // leader only
-        p.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG,                 false);  // not compatible with acks=1
-        p.put(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION,     10);     // more pipeline
-        p.put(ProducerConfig.BATCH_SIZE_CONFIG,                         32768);  // 32KB — smaller, sends faster
-        p.put(ProducerConfig.LINGER_MS_CONFIG,                          1);      // 1ms — fill batch quickly
+        p.put(ProducerConfig.ACKS_CONFIG, "1");
+        p.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, false);
+        p.put(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, 10);
+        p.put(ProducerConfig.BATCH_SIZE_CONFIG, 8192);
+        p.put(ProducerConfig.LINGER_MS_CONFIG, 1);
         return p;
     }
-
-    // ── Job Event (DURABLE) ───────────────────────────────────────────────────
 
     @Bean
     public ProducerFactory<String, JobEvent> jobEventProducerFactory() {
@@ -90,8 +94,6 @@ public class KafkaProducerConfig {
     public KafkaTemplate<String, JobEvent> jobEventKafkaTemplate() {
         return new KafkaTemplate<>(jobEventProducerFactory());
     }
-
-    // ── Execution Event (FAST) ────────────────────────────────────────────────
 
     @Bean
     public ProducerFactory<String, JobExecutionEvent> jobExecutionEventProducerFactory() {

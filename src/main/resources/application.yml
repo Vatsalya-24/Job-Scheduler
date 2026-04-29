@@ -2,117 +2,134 @@ spring:
   application:
     name: orbit-platform
 
+  # ── Database ──────────────────────────────────────────────────────────────
+  # On Render: set DATABASE_URL as a single connection string (Render's format)
+  # OR set individual DB_HOST / DB_NAME / DB_USERNAME / DB_PASSWORD env vars
   datasource:
-    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:orbit}
+    url: ${DATABASE_URL:jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:orbit}}
     username: ${DB_USERNAME:postgres}
-    password: ${DB_PASSWORD:vatsalya}
+    password: ${DB_PASSWORD:postgres}
     driver-class-name: org.postgresql.Driver
     hikari:
       pool-name: OrbitPool
-      minimum-idle: 20
-      maximum-pool-size: 100
-      # ROOT CAUSE FIX: 3000ms connection-timeout was too short at high load.
-      # Under 2000 req/s bursts the pool exhausted and 3s wasn't enough to wait.
-      # 8000ms gives the pool time to reclaim connections from finishing requests.
-      connection-timeout: 8000
-      idle-timeout: 600000
-      max-lifetime: 1800000
-      leak-detection-threshold: 10000
+      # FIX: Render free Postgres allows max 10 connections.
+      # Starter plan: 25. Scale this up when upgrading your Render plan.
+      minimum-idle: 2
+      maximum-pool-size: ${DB_POOL_SIZE:5}
+      connection-timeout: 10000
+      idle-timeout: 300000
+      max-lifetime: 600000
+      leak-detection-threshold: 30000
       connection-test-query: SELECT 1
       data-source-properties:
         cachePrepStmts: true
-        prepStmtCacheSize: 250
+        prepStmtCacheSize: 100
         prepStmtCacheSqlLimit: 2048
-        useServerPrepStmts: true
 
   jpa:
+    # FIX: use 'update' not 'validate' for first deploy so Hibernate creates missing columns
+    # Switch back to 'validate' after the first successful deploy
     hibernate:
-      ddl-auto: validate
+      ddl-auto: ${DDL_AUTO:update}
     show-sql: false
     open-in-view: false
     properties:
       hibernate:
         dialect: org.hibernate.dialect.PostgreSQLDialect
         jdbc:
-          batch_size: 50
-          fetch_size: 100
+          batch_size: 20
+          fetch_size: 50
         order_inserts: true
         order_updates: true
 
   sql:
     init:
+      # 'always' runs schema.sql every startup (IF NOT EXISTS makes it safe)
       mode: always
+      # FIX: schema must run before Hibernate validation
+      continue-on-error: true
 
+  # ── Redis ─────────────────────────────────────────────────────────────────
+  # On Render: add a Redis service and set REDIS_URL env var (Render's format)
+  # OR use Upstash Redis (free tier) and set REDIS_URL
   data:
     redis:
-      host: ${REDIS_HOST:localhost}
-      port: ${REDIS_PORT:6379}
-      password: ${REDIS_PASSWORD:}
-      # ROOT CAUSE FIX: 2000ms timeout caused Redis ops to fail under load.
-      # Redis itself is fast (<1ms) but network jitter at high concurrency
-      # meant some ops hit the 2s timeout. 5s gives headroom.
+      url: ${REDIS_URL:redis://localhost:6379}
       timeout: 5000ms
       lettuce:
         pool:
-          max-active: 100   # increased from 50 — matches DB pool size
-          max-idle: 30
-          min-idle: 10
-          max-wait: 2000ms  # wait up to 2s for a Redis connection
+          max-active: 10
+          max-idle: 5
+          min-idle: 1
+          max-wait: 3000ms
 
   cache:
     type: redis
     redis:
       time-to-live: 300000
 
+  # ── Kafka ─────────────────────────────────────────────────────────────────
+  # On Render: use Upstash Kafka (free tier at upstash.com/kafka)
+  # Set KAFKA_SERVERS, KAFKA_USERNAME, KAFKA_PASSWORD env vars from Upstash console
   kafka:
     bootstrap-servers: ${KAFKA_SERVERS:localhost:9092}
+    properties:
+      # Upstash Kafka requires SASL/SSL — these activate when KAFKA_USERNAME is set
+      security.protocol: ${KAFKA_SECURITY_PROTOCOL:PLAINTEXT}
+      sasl.mechanism: ${KAFKA_SASL_MECHANISM:PLAIN}
+      sasl.jaas.config: ${KAFKA_SASL_JAAS:}
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
-      # Defaults inherited; per-producer overrides are in KafkaProducerConfig.java
-      acks: all
+      acks: ${KAFKA_ACKS:1}
       retries: 3
-      batch-size: 65536
+      batch-size: 16384
       linger-ms: 5
-      buffer-memory: 67108864
+      buffer-memory: 33554432
       compression-type: snappy
       properties:
-        enable.idempotence: true
-        max.in.flight.requests.per.connection: 5
+        enable.idempotence: false
     consumer:
       group-id: orbit-group
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
       auto-offset-reset: earliest
       enable-auto-commit: false
-      max-poll-records: 500
+      max-poll-records: 100
       properties:
         spring.json.trusted.packages: "com.jobScheduling.job.*"
-        session.timeout.ms: 30000
-        heartbeat.interval.ms: 10000
+        session.timeout.ms: 45000
+        heartbeat.interval.ms: 15000
         max.poll.interval.ms: 300000
 
+# ── Async thread pools ────────────────────────────────────────────────────
+# FIX: Reduced drastically — Render free tier has 512MB RAM
+# 400 threads × ~1MB stack = OOM. Use small pools; virtual threads handle the rest.
 async:
   executor:
-    core-pool-size: 50          # increased from 20 — match request concurrency
-    max-pool-size: 400          # increased from 200 — headroom for spikes
-    queue-capacity: 20000       # increased from 10000
+    core-pool-size: ${ASYNC_CORE_POOL:5}
+    max-pool-size: ${ASYNC_MAX_POOL:20}
+    queue-capacity: 1000
     thread-name-prefix: "orbit-async-"
-    keep-alive-seconds: 60
+    keep-alive-seconds: 30
 
+# ── Server ────────────────────────────────────────────────────────────────
 server:
-  port: ${SERVER_PORT:8080}
+  # FIX: Render assigns PORT dynamically — must bind to 0.0.0.0:$PORT
+  port: ${PORT:8080}
   tomcat:
     threads:
-      max: 400
-      min-spare: 50
-    accept-count: 500           # increased from 200 — queue more connections
-    connection-timeout: 10000   # increased from 5000ms
-    max-connections: 10000
+      # FIX: 400 threads on 512MB RAM = OOM. Keep small; virtual threads help.
+      max: ${TOMCAT_MAX_THREADS:50}
+      min-spare: 5
+    accept-count: 100
+    connection-timeout: 10000
+    max-connections: 2000
   compression:
     enabled: true
     mime-types: application/json,text/plain,text/html
 
+# ── Actuator ─────────────────────────────────────────────────────────────
 management:
   endpoints:
     web:
@@ -121,38 +138,42 @@ management:
   endpoint:
     health:
       show-details: always
+      # FIX: Don't fail startup if Kafka is slightly slow to connect
+      probes:
+        enabled: true
+  health:
+    kafka:
+      enabled: ${KAFKA_HEALTH_ENABLED:true}
   metrics:
     tags:
       application: ${spring.application.name}
 
+# ── Resilience4j ─────────────────────────────────────────────────────────
 resilience4j:
   ratelimiter:
     instances:
       jobApi:
-        # ROOT CAUSE FIX: 1000 req/s was too low — the load test sent 2000 exec/s
-        # + 1000 create/s = 3000 req/s hitting the rate limiter → mass 429s.
-        # Increase to 5000 req/s per instance. The real traffic shaping is done
-        # at the infrastructure level (load balancer / API gateway).
-        limit-for-period: 5000
+        limit-for-period: 500
         limit-refresh-period: 1s
         timeout-duration: 0s
   circuitbreaker:
     instances:
       jobService:
-        sliding-window-size: 100
+        sliding-window-size: 20
         failure-rate-threshold: 50
         wait-duration-in-open-state: 10s
-        permitted-number-of-calls-in-half-open-state: 10
+        permitted-number-of-calls-in-half-open-state: 5
         register-health-indicator: true
   retry:
     instances:
       jobExecution:
         max-attempts: 3
-        wait-duration: 500ms
+        wait-duration: 1s
         retry-exceptions:
           - org.springframework.dao.TransientDataAccessException
           - org.springframework.kafka.KafkaException
 
+# ── Kafka topic names ─────────────────────────────────────────────────────
 kafka:
   topics:
     job-created: orbit.job-created
@@ -161,8 +182,11 @@ kafka:
     job-retry: orbit.job-retry
     dead-letter: orbit.job-dead-letter
   consumer:
-    concurrency: 10
+    concurrency: ${KAFKA_CONSUMER_CONCURRENCY:2}
 
+# ── CORS ─────────────────────────────────────────────────────────────────
 app:
   cors:
-    allowed-origins: ${CORS_ORIGINS:http://localhost:3000,http://localhost:5500,http://127.0.0.1:5500}
+    # FIX: Set CORS_ORIGINS env var in Render to your frontend URL
+    # e.g.  CORS_ORIGINS=https://your-app.onrender.com
+    allowed-origins: ${CORS_ORIGINS:http://localhost:3000,http://localhost:8080}

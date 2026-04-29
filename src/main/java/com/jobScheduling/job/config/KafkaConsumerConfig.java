@@ -21,6 +21,15 @@ import org.springframework.util.backoff.FixedBackOff;
 import java.util.HashMap;
 import java.util.Map;
 
+/**
+ * Kafka consumer config — Render/Upstash compatible.
+ *
+ * CHANGES FOR RENDER:
+ *   - SASL/SSL properties injected from env vars
+ *   - Concurrency configurable via KAFKA_CONSUMER_CONCURRENCY (default 2)
+ *     Upstash free tier: 3 partitions max, so 2 consumers is sufficient
+ *   - max-poll-records reduced to 100 (less memory pressure on 512MB Render tier)
+ */
 @Configuration
 @EnableKafka
 public class KafkaConsumerConfig {
@@ -28,111 +37,94 @@ public class KafkaConsumerConfig {
     @Value("${spring.kafka.bootstrap-servers}")
     private String bootstrapServers;
 
-    @Value("${kafka.consumer.concurrency:10}")
+    @Value("${kafka.consumer.concurrency:2}")
     private int concurrency;
 
+    @Value("${spring.kafka.properties.security.protocol:PLAINTEXT}")
+    private String securityProtocol;
+
+    @Value("${spring.kafka.properties.sasl.mechanism:PLAIN}")
+    private String saslMechanism;
+
+    @Value("${spring.kafka.properties.sasl.jaas.config:}")
+    private String saslJaasConfig;
+
     private Map<String, Object> baseConsumerProps(String groupId) {
-        Map<String, Object> props = new HashMap<>();
-        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
-        props.put(ConsumerConfig.GROUP_ID_CONFIG, groupId);
-        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
-        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, JsonDeserializer.class);
+        Map<String, Object> p = new HashMap<>();
+        p.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+        p.put(ConsumerConfig.GROUP_ID_CONFIG, groupId);
+        p.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        p.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, JsonDeserializer.class);
+        p.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
+        p.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        p.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, 100);
+        p.put(ConsumerConfig.FETCH_MIN_BYTES_CONFIG, 1);
+        p.put(ConsumerConfig.FETCH_MAX_WAIT_MS_CONFIG, 500);
+        p.put(ConsumerConfig.SESSION_TIMEOUT_MS_CONFIG, 45000);
+        p.put(ConsumerConfig.HEARTBEAT_INTERVAL_MS_CONFIG, 15000);
+        p.put(ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG, 300000);
+        p.put(JsonDeserializer.TRUSTED_PACKAGES, "com.jobScheduling.job.*");
+        p.put(JsonDeserializer.USE_TYPE_INFO_HEADERS, false);
 
-        // Never lose a message — manual commit
-        props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
-        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
-
-        // Throughput tuning
-        props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, 500);
-        props.put(ConsumerConfig.FETCH_MIN_BYTES_CONFIG, 1);
-        props.put(ConsumerConfig.FETCH_MAX_WAIT_MS_CONFIG, 500);
-
-        // Session / heartbeat — avoid false rebalances
-        props.put(ConsumerConfig.SESSION_TIMEOUT_MS_CONFIG, 30000);
-        props.put(ConsumerConfig.HEARTBEAT_INTERVAL_MS_CONFIG, 10000);
-        props.put(ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG, 300000);
-
-        props.put(JsonDeserializer.TRUSTED_PACKAGES, "com.jobScheduling.job.*");
-        props.put(JsonDeserializer.USE_TYPE_INFO_HEADERS, false);
-
-        return props;
+        // Upstash SASL
+        if (!"PLAINTEXT".equals(securityProtocol)) {
+            p.put("security.protocol", securityProtocol);
+            p.put("sasl.mechanism", saslMechanism);
+            if (!saslJaasConfig.isBlank()) {
+                p.put("sasl.jaas.config", saslJaasConfig);
+            }
+        }
+        return p;
     }
-
-    // ── Job Event Consumer ────────────────────────────────────────────────────
 
     @Bean
     public ConsumerFactory<String, JobEvent> jobEventConsumerFactory() {
         return new DefaultKafkaConsumerFactory<>(
-                baseConsumerProps("job-scheduler-group"),
+                baseConsumerProps("orbit-group"),
                 new StringDeserializer(),
-                new JsonDeserializer<>(JobEvent.class, false)
-        );
+                new JsonDeserializer<>(JobEvent.class, false));
     }
 
     @Bean
     public ConcurrentKafkaListenerContainerFactory<String, JobEvent> jobEventListenerFactory(
             KafkaTemplate<String, JobEvent> kafkaTemplate) {
-
         ConcurrentKafkaListenerContainerFactory<String, JobEvent> factory =
                 new ConcurrentKafkaListenerContainerFactory<>();
         factory.setConsumerFactory(jobEventConsumerFactory());
-
-        // High concurrency — 10 threads per instance = handles bursts
         factory.setConcurrency(concurrency);
-
-        // Manual acknowledgement — commit only on successful processing
         factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL_IMMEDIATE);
-
-        // Error handler: retry 3 times with 1s backoff, then send to DLT
         factory.setCommonErrorHandler(buildErrorHandler(kafkaTemplate));
-
-        // Batch listener for high throughput
         factory.setBatchListener(true);
-
         return factory;
     }
-
-    // ── Job Execution Event Consumer ─────────────────────────────────────────
 
     @Bean
     public ConsumerFactory<String, JobExecutionEvent> jobExecutionEventConsumerFactory() {
         return new DefaultKafkaConsumerFactory<>(
-                baseConsumerProps("job-execution-group"),
+                baseConsumerProps("orbit-execution-group"),
                 new StringDeserializer(),
-                new JsonDeserializer<>(JobExecutionEvent.class, false)
-        );
+                new JsonDeserializer<>(JobExecutionEvent.class, false));
     }
 
     @Bean
     public ConcurrentKafkaListenerContainerFactory<String, JobExecutionEvent> jobExecutionListenerFactory(
             KafkaTemplate<String, JobEvent> kafkaTemplate) {
-
         ConcurrentKafkaListenerContainerFactory<String, JobExecutionEvent> factory =
                 new ConcurrentKafkaListenerContainerFactory<>();
         factory.setConsumerFactory(jobExecutionEventConsumerFactory());
         factory.setConcurrency(concurrency);
         factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL_IMMEDIATE);
         factory.setCommonErrorHandler(buildErrorHandler(kafkaTemplate));
-
         return factory;
     }
 
-    // ── Shared Error Handler ──────────────────────────────────────────────────
-
     private <V> DefaultErrorHandler buildErrorHandler(KafkaTemplate<String, V> kafkaTemplate) {
-        // Publish failed records to DLT after exhausting retries
         DeadLetterPublishingRecoverer recoverer =
                 new DeadLetterPublishingRecoverer(kafkaTemplate);
-
-        // 3 retries with 1-second fixed backoff before DLT
-        DefaultErrorHandler errorHandler = new DefaultErrorHandler(
-                recoverer, new FixedBackOff(1000L, 3L));
-
-        // Don't retry on deserialization errors — they'll always fail
-        errorHandler.addNotRetryableExceptions(
-                org.springframework.kafka.support.serializer.DeserializationException.class
-        );
-
-        return errorHandler;
+        DefaultErrorHandler handler = new DefaultErrorHandler(
+                recoverer, new FixedBackOff(2000L, 3L));
+        handler.addNotRetryableExceptions(
+                org.springframework.kafka.support.serializer.DeserializationException.class);
+        return handler;
     }
 }
