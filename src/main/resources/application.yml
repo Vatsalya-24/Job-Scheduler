@@ -175,6 +175,11 @@ resilience4j:
 
 # ── Kafka topic names ─────────────────────────────────────────────────────
 kafka:
+  bootstrap-servers: ${KAFKA_SERVERS}
+  properties:
+      security.protocol: ${KAFKA_SECURITY_PROTOCOL}
+      sasl.mechanism: ${KAFKA_SASL_MECHANISM}
+      sasl.jaas.config: ${KAFKA_SASL_JAAS}
   topics:
     job-created: orbit.job-created
     job-execution-request: orbit.job-execution-request
