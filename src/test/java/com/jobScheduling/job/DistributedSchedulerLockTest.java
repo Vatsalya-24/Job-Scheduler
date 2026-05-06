@@ -28,12 +28,12 @@ class DistributedSchedulerLockTest {
 
     @BeforeEach
     void setUp() {
-        when(redis.opsForValue()).thenReturn(valueOps);
         lock = new DistributedSchedulerLock(redis);
     }
 
     @Test
     void tryAcquire_returnsTrue_whenRedisSetSucceeds() {
+        when(redis.opsForValue()).thenReturn(valueOps);
         when(valueOps.setIfAbsent(anyString(), anyString(), any(Duration.class)))
                 .thenReturn(true);
 
@@ -42,6 +42,7 @@ class DistributedSchedulerLockTest {
 
     @Test
     void tryAcquire_returnsFalse_whenLockAlreadyHeld() {
+        when(redis.opsForValue()).thenReturn(valueOps);
         when(valueOps.setIfAbsent(anyString(), anyString(), any(Duration.class)))
                 .thenReturn(false);
 
@@ -50,6 +51,7 @@ class DistributedSchedulerLockTest {
 
     @Test
     void tryAcquire_returnsFalse_whenRedisReturnsNull() {
+        when(redis.opsForValue()).thenReturn(valueOps);
         when(valueOps.setIfAbsent(anyString(), anyString(), any(Duration.class)))
                 .thenReturn(null);
 
@@ -58,6 +60,7 @@ class DistributedSchedulerLockTest {
 
     @Test
     void instanceId_isUniquePerInstance() {
+        // No Redis interaction needed — just verifies UUID uniqueness
         DistributedSchedulerLock lock2 = new DistributedSchedulerLock(redis);
         assertThat(lock.getInstanceId()).isNotEqualTo(lock2.getInstanceId());
     }

@@ -28,12 +28,12 @@ class IdempotencyFilterTest {
 
     @BeforeEach
     void setUp() {
-        when(redis.opsForValue()).thenReturn(valueOps);
         filter = new IdempotencyFilter(redis);
     }
 
     @Test
     void get_requests_skip_idempotency_check() throws Exception {
+        // GET requests bypass idempotency — no Redis interaction expected
         MockHttpServletRequest  req   = new MockHttpServletRequest("GET", "/api/v1/jobs");
         MockHttpServletResponse res   = new MockHttpServletResponse();
         MockFilterChain         chain = new MockFilterChain();
@@ -47,6 +47,7 @@ class IdempotencyFilterTest {
 
     @Test
     void post_without_idempotency_key_passes_through() throws Exception {
+        // POST without Idempotency-Key header bypasses idempotency check
         MockHttpServletRequest  req   = new MockHttpServletRequest("POST", "/api/v1/jobs");
         MockHttpServletResponse res   = new MockHttpServletResponse();
         MockFilterChain         chain = new MockFilterChain();
@@ -57,6 +58,7 @@ class IdempotencyFilterTest {
 
     @Test
     void cache_miss_processes_request_normally() throws Exception {
+        when(redis.opsForValue()).thenReturn(valueOps);
         when(valueOps.get("idempotency:key-abc")).thenReturn(null);
 
         MockHttpServletRequest  req   = new MockHttpServletRequest("POST", "/api/v1/jobs");
@@ -75,6 +77,7 @@ class IdempotencyFilterTest {
     @Test
     void cache_hit_returns_cached_response_without_calling_chain() throws Exception {
         // Simulate a cached 201 response
+        when(redis.opsForValue()).thenReturn(valueOps);
         when(valueOps.get("idempotency:key-xyz")).thenReturn("201|{\"id\":42,\"name\":\"test\"}");
 
         MockHttpServletRequest  req   = new MockHttpServletRequest("POST", "/api/v1/jobs");
