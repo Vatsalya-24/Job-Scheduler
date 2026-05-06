@@ -1,0 +1,394 @@
+{
+  "info": {
+    "name": "Orbit Platform API",
+    "description": "Complete API collection for the Orbit Job Orchestration Platform.\n\nSet the `base_url` variable to your server (default: http://localhost:8080).\n\nRun the 'Setup' folder first to create seed data.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8080", "type": "string" },
+    { "key": "job_id",   "value": "1",                    "type": "string" },
+    { "key": "wh_id",    "value": "1",                    "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/actuator/health",
+            "description": "Returns UP when Kafka, Redis, and PostgreSQL are all healthy."
+          },
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('Status is UP', () => {",
+              "  const body = pm.response.json();",
+              "  pm.expect(body.status).to.eql('UP');",
+              "});"
+            ]}
+          }]
+        },
+        {
+          "name": "Dashboard Summary",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/api/v1/dashboard/summary"
+          },
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('Has jobs object', () => {",
+              "  pm.expect(pm.response.json()).to.have.property('jobs');",
+              "});",
+              "pm.test('Has executions object', () => {",
+              "  pm.expect(pm.response.json()).to.have.property('executions');",
+              "});"
+            ]}
+          }]
+        }
+      ]
+    },
+    {
+      "name": "Jobs — CRUD",
+      "item": [
+        {
+          "name": "Create Job",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/api/v1/jobs",
+            "header": [
+              { "key": "Content-Type",   "value": "application/json" },
+              { "key": "Idempotency-Key","value": "create-job-{{$randomUUID}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"daily-report-{{$randomInt}}\",\n  \"cronExpression\": \"0 0 8 * * *\",\n  \"target\": \"https://api.internal/reports/daily\",\n  \"status\": \"ACTIVE\"\n}"
+            },
+            "description": "Creates a new cron job. Include Idempotency-Key header to safely retry on network failures."
+          },
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('Status 201', () => pm.response.to.have.status(201));",
+              "pm.test('Has id', () => pm.expect(pm.response.json().id).to.be.a('number'));",
+              "const id = pm.response.json().id;",
+              "if (id) pm.collectionVariables.set('job_id', id);"
+            ]}
+          }]
+        },
+        {
+          "name": "Get Job (cached)",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/api/v1/jobs/{{job_id}}",
+            "description": "Second call is served from Redis cache (<1ms)."
+          },
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('Status 200', () => pm.response.to.have.status(200));",
+              "pm.test('Response time < 200ms', () => pm.expect(pm.response.responseTime).to.be.below(200));"
+            ]}
+          }]
+        },
+        {
+          "name": "List Jobs (paginated)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/v1/jobs?page=0&size=10&sort=nextFireTime,asc",
+              "query": [
+                { "key": "page", "value": "0" },
+                { "key": "size", "value": "10" },
+                { "key": "sort", "value": "nextFireTime,asc" }
+              ]
+            }
+          },
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('Status 200', () => pm.response.to.have.status(200));",
+              "pm.test('Has page metadata', () => {",
+              "  const body = pm.response.json();",
+              "  pm.expect(body).to.have.property('totalElements');",
+              "  pm.expect(body).to.have.property('content');",
+              "});"
+            ]}
+          }]
+        },
+        {
+          "name": "Update Job",
+          "request": {
+            "method": "PUT",
+            "url": "{{base_url}}/api/v1/jobs/{{job_id}}",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"daily-report-updated\",\n  \"cronExpression\": \"0 0 9 * * *\",\n  \"target\": \"https://api.internal/reports/daily\",\n  \"status\": \"ACTIVE\"\n}"
+            }
+          },
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('Status 200', () => pm.response.to.have.status(200));",
+              "pm.test('Name updated', () => pm.expect(pm.response.json().name).to.eql('daily-report-updated'));"
+            ]}
+          }]
+        },
+        {
+          "name": "Disable Job",
+          "request": {
+            "method": "DELETE",
+            "url": "{{base_url}}/api/v1/jobs/{{job_id}}",
+            "description": "Soft delete — sets status to DISABLED. Execution history is preserved."
+          },
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('Status 204', () => pm.response.to.have.status(204));"
+            ]}
+          }]
+        }
+      ]
+    },
+    {
+      "name": "Jobs — Lifecycle",
+      "item": [
+        {
+          "name": "Pause Job",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/api/v1/jobs/{{job_id}}/pause",
+            "description": "Stops the job from firing. Schedule is retained for resume."
+          },
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('Status 200', () => pm.response.to.have.status(200));",
+              "pm.test('Status is PAUSED', () => pm.expect(pm.response.json().status).to.eql('PAUSED'));"
+            ]}
+          }]
+        },
+        {
+          "name": "Resume Job",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/api/v1/jobs/{{job_id}}/resume",
+            "description": "Resumes a paused job. next_fire_time is recalculated from NOW — missed windows are skipped."
+          },
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('Status 200', () => pm.response.to.have.status(200));",
+              "pm.test('Status is ACTIVE', () => pm.expect(pm.response.json().status).to.eql('ACTIVE'));",
+              "pm.test('Has nextFireTime', () => pm.expect(pm.response.json().nextFireTime).to.not.be.null);"
+            ]}
+          }]
+        },
+        {
+          "name": "Trigger Now (one-off)",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/api/v1/jobs/{{job_id}}/trigger",
+            "description": "Fires the job immediately — picked up by the scheduler in the next 1-second poll."
+          },
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('Status 202', () => pm.response.to.have.status(202));",
+              "pm.test('Has message', () => pm.expect(pm.response.json().message).to.include('triggered'));"
+            ]}
+          }]
+        }
+      ]
+    },
+    {
+      "name": "Executions",
+      "item": [
+        {
+          "name": "Record SUCCESS (async)",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/api/v1/jobs/{{job_id}}/executions",
+            "header": [
+              { "key": "Content-Type",    "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "exec-success-{{$randomUUID}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"SUCCESS\",\n  \"startedAt\": \"{{$isoTimestamp}}\",\n  \"finishedAt\": \"{{$isoTimestamp}}\"\n}"
+            },
+            "description": "Returns 202 Accepted immediately. Actual DB write happens in Kafka consumer."
+          },
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('Status 202', () => pm.response.to.have.status(202));",
+              "pm.test('Status is queued', () => pm.expect(pm.response.json().status).to.eql('queued'));",
+              "pm.test('Response time < 30ms', () => pm.expect(pm.response.responseTime).to.be.below(30));"
+            ]}
+          }]
+        },
+        {
+          "name": "Record FAILED (async)",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/api/v1/jobs/{{job_id}}/executions",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"FAILED\",\n  \"errorMessage\": \"Connection timeout after 30s\"\n}"
+            }
+          },
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('Status 202', () => pm.response.to.have.status(202));"
+            ]}
+          }]
+        },
+        {
+          "name": "Get Execution History",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/v1/jobs/{{job_id}}/executions?page=0&size=20",
+              "query": [
+                { "key": "page", "value": "0" },
+                { "key": "size", "value": "20" }
+              ]
+            }
+          },
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('Status 200', () => pm.response.to.have.status(200));",
+              "pm.test('Has content array', () => pm.expect(pm.response.json().content).to.be.an('array'));"
+            ]}
+          }]
+        }
+      ]
+    },
+    {
+      "name": "Webhooks",
+      "item": [
+        {
+          "name": "Register Webhook",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/api/v1/jobs/{{job_id}}/webhooks",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"url\": \"http://localhost:8888\",\n  \"secretKey\": \"my-hmac-secret\",\n  \"eventFilter\": \"ALL\"\n}"
+            },
+            "description": "Register a webhook. The receiver at http://localhost:8888 (docker-compose webhook-receiver) will display incoming payloads."
+          },
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('Status 201', () => pm.response.to.have.status(201));",
+              "const id = pm.response.json().id;",
+              "if (id) pm.collectionVariables.set('wh_id', id);"
+            ]}
+          }]
+        },
+        {
+          "name": "List Webhooks for Job",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/api/v1/jobs/{{job_id}}/webhooks"
+          },
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('Status 200', () => pm.response.to.have.status(200));",
+              "pm.test('Returns array', () => pm.expect(pm.response.json()).to.be.an('array'));"
+            ]}
+          }]
+        },
+        {
+          "name": "Get Delivery History",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/api/v1/jobs/{{job_id}}/webhooks/{{wh_id}}/deliveries"
+          },
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('Status 200', () => pm.response.to.have.status(200));"
+            ]}
+          }]
+        },
+        {
+          "name": "Deactivate Webhook",
+          "request": {
+            "method": "DELETE",
+            "url": "{{base_url}}/api/v1/jobs/{{job_id}}/webhooks/{{wh_id}}"
+          },
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('Status 204', () => pm.response.to.have.status(204));"
+            ]}
+          }]
+        }
+      ]
+    },
+    {
+      "name": "Idempotency",
+      "item": [
+        {
+          "name": "Create Job (first request)",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/api/v1/jobs",
+            "header": [
+              { "key": "Content-Type",    "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "fixed-key-for-idempotency-test" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"idempotent-job\",\n  \"cronExpression\": \"0 * * * * *\",\n  \"target\": \"https://api.internal/run\",\n  \"status\": \"ACTIVE\"\n}"
+            }
+          },
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('Status 201 on first call', () => pm.response.to.have.status(201));",
+              "pm.collectionVariables.set('idempotent_job_id', pm.response.json().id);"
+            ]}
+          }]
+        },
+        {
+          "name": "Create Job (duplicate — should return cached 201)",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/api/v1/jobs",
+            "header": [
+              { "key": "Content-Type",    "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "fixed-key-for-idempotency-test" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"idempotent-job\",\n  \"cronExpression\": \"0 * * * * *\",\n  \"target\": \"https://api.internal/run\",\n  \"status\": \"ACTIVE\"\n}"
+            }
+          },
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('Status 201 on retry (cached)', () => pm.response.to.have.status(201));",
+              "pm.test('Replayed header present', () => pm.expect(pm.response.headers.get('X-Idempotency-Replayed')).to.eql('true'));",
+              "pm.test('Same job ID returned', () => {",
+              "  const originalId = pm.collectionVariables.get('idempotent_job_id');",
+              "  pm.expect(String(pm.response.json().id)).to.eql(String(originalId));",
+              "});"
+            ]}
+          }]
+        }
+      ]
+    }
+  ]
+}

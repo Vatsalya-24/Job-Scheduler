@@ -1,0 +1,26 @@
+# Maven
+target/
+*.jar
+*.war
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.class
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+*.env
+application-local.yml
+application-prod.yml
+
+# Docker volumes
+postgres_data/
+redis_data/
+
+# k6 outputs
+load-test-results.json
