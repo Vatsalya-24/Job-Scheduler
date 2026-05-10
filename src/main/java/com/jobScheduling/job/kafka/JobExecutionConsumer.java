@@ -19,6 +19,7 @@ import org.springframework.stereotype.Component;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -131,6 +132,24 @@ public class JobExecutionConsumer {
 
     private JobExecution mapToEntity(JobExecutionEvent ev) {
         try {
+            // UPDATE the existing row created by the poller (status=STARTED).
+            // Without this, every Kafka event inserts a NEW row — causing
+            // 320K STARTED rows + 320K SUCCESS rows with successRate stuck at 0.
+            if (ev.getExecutionId() != null) {
+                JobExecution exec = jobExecutionRepository.findById(ev.getExecutionId())
+                        .orElse(null);
+                if (exec != null) {
+                    exec.setStatus(ExecutionStatus.valueOf(ev.getStatus()));
+                    if (ev.getFinishedAt() != null) {
+                        exec.setFinishedAt(Timestamp.from(ev.getFinishedAt()));
+                    } else if (!ev.getStatus().equals(ExecutionStatus.STARTED.name())) {
+                        exec.setFinishedAt(Timestamp.from(Instant.now()));
+                    }
+                    exec.setErrorMessage(ev.getErrorMessage());
+                    return exec;
+                }
+            }
+            // Fallback: create a new row (replay / recovery scenarios)
             Jobs job = jobsRepository.findById(ev.getJobId()).orElse(null);
             if (job == null) { log.warn("Job not found: {}", ev.getJobId()); return null; }
             JobExecution exec = new JobExecution();
@@ -149,14 +168,16 @@ public class JobExecutionConsumer {
     }
 
     private Map<String, Object> buildPayload(JobExecutionEvent ev, JobExecution saved) {
-        return Map.of(
-                "jobId",       ev.getJobId(),
-                "executionId", saved.getId(),
-                "status",      ev.getStatus(),
-                "startedAt",   ev.getStartedAt() != null ? ev.getStartedAt().toString() : "",
-                "finishedAt",  ev.getFinishedAt() != null ? ev.getFinishedAt().toString() : "",
-                "errorMessage", ev.getErrorMessage() != null ? ev.getErrorMessage() : "",
-                "attempt",     ev.getAttemptNumber()
-        );
+        Map<String, Object> p = new HashMap<>();
+
+        p.put("jobId", ev.getJobId());
+        p.put("executionId", saved.getId());
+        p.put("status", ev.getStatus());
+        p.put("startedAt", ev.getStartedAt() != null ? ev.getStartedAt().toString() : "");
+        p.put("finishedAt", ev.getFinishedAt() != null ? ev.getFinishedAt().toString() : "");
+        p.put("errorMessage", ev.getErrorMessage() != null ? ev.getErrorMessage() : "");
+        p.put("attempt", ev.getAttemptNumber());
+
+        return p;
     }
 }

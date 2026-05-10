@@ -13,6 +13,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.context.annotation.Import;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
@@ -30,7 +31,12 @@ class JobsControllerTest {
 
     @MockBean private JobsService          jobsService;
     @MockBean private JobExecutionService  jobExecutionService;
-    @MockBean private JobLifecycleService  lifecycleService;   // BUG 3 FIX — was missing
+    @MockBean private JobLifecycleService  lifecycleService;
+
+    // IdempotencyFilter is a @Component picked up by @WebMvcTest. It requires
+    // StringRedisTemplate, which is NOT auto-configured in the slim WebMvc slice.
+    // Providing a MockBean satisfies the dependency without spinning up Redis.
+    @MockBean private StringRedisTemplate  stringRedisTemplate;
 
     @Test
     void createJob_returns201_withValidPayload() throws Exception {

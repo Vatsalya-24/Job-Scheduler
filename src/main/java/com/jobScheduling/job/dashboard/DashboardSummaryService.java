@@ -8,8 +8,9 @@ import com.jobScheduling.job.webhook.WebhookDeliveryRepository;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-
+import  java.util.HashMap;
 import java.util.Map;
+
 
 /**
  * Caching service layer for dashboard metrics.
@@ -34,74 +35,108 @@ import java.util.Map;
 @Transactional(readOnly = true)
 public class DashboardSummaryService {
 
-    private final JobsRepository            jobsRepository;
-    private final JobExecutionRepository    executionRepository;
+    private final JobsRepository jobsRepository;
+    private final JobExecutionRepository executionRepository;
     private final WebhookDeliveryRepository deliveryRepository;
 
     public DashboardSummaryService(
             JobsRepository jobsRepository,
             JobExecutionRepository executionRepository,
             WebhookDeliveryRepository deliveryRepository) {
-        this.jobsRepository      = jobsRepository;
+
+        this.jobsRepository = jobsRepository;
         this.executionRepository = executionRepository;
-        this.deliveryRepository  = deliveryRepository;
+        this.deliveryRepository = deliveryRepository;
     }
 
     /**
-     * Cached platform-wide summary — plain Map, safe for Redis serialisation.
-     * TTL 10 s (registered in RedisConfig). At 100 concurrent dashboard readers,
-     * DB is hit at most once per 10 seconds instead of 100 × 8 queries/s = 800/s.
+     * Cached platform-wide summary.
+     * TTL handled in RedisConfig.
      */
     @Cacheable(value = "dashboardSummary", key = "'global'")
     public Map<String, Object> getSummary() {
-        long totalJobs    = jobsRepository.count();
-        long activeJobs   = jobsRepository.countByStatus(JobStatus.ACTIVE);
-        long pausedJobs   = jobsRepository.countByStatus(JobStatus.PAUSED);
+
+        long totalJobs = jobsRepository.count();
+        long activeJobs = jobsRepository.countByStatus(JobStatus.ACTIVE);
+        long pausedJobs = jobsRepository.countByStatus(JobStatus.PAUSED);
         long disabledJobs = jobsRepository.countByStatus(JobStatus.DISABLED);
 
-        long totalExec   = executionRepository.count();
+        long totalExec = executionRepository.count();
         long successExec = executionRepository.countByStatus(ExecutionStatus.SUCCESS);
-        long failedExec  = executionRepository.countByStatus(ExecutionStatus.FAILED);
+        long failedExec = executionRepository.countByStatus(ExecutionStatus.FAILED);
         long runningExec = executionRepository.countByStatus(ExecutionStatus.STARTED);
-        double rate      = totalExec > 0 ? (double) successExec / totalExec * 100 : 0;
 
-        long totalWh     = deliveryRepository.count();
+        double rate = totalExec > 0
+                ? (double) successExec / totalExec * 100
+                : 0;
+
+        long totalWh = deliveryRepository.count();
         long deliveredWh = deliveryRepository.countByStatus("DELIVERED");
         long exhaustedWh = deliveryRepository.countByStatus("EXHAUSTED");
 
-        return Map.of(
-                "jobs", Map.of(
-                        "total",    totalJobs,
-                        "active",   activeJobs,
-                        "paused",   pausedJobs,
-                        "disabled", disabledJobs),
-                "executions", Map.of(
-                        "total",       totalExec,
-                        "success",     successExec,
-                        "failed",      failedExec,
-                        "running",     runningExec,
-                        "successRate", Math.round(rate * 10.0) / 10.0),
-                "webhooks", Map.of(
-                        "total",     totalWh,
-                        "delivered", deliveredWh,
-                        "exhausted", exhaustedWh));
+        Map<String, Object> jobs = new HashMap<>();
+        jobs.put("total", totalJobs);
+        jobs.put("active", activeJobs);
+        jobs.put("paused", pausedJobs);
+        jobs.put("disabled", disabledJobs);
+
+        Map<String, Object> executions = new HashMap<>();
+        executions.put("total", totalExec);
+        executions.put("success", successExec);
+        executions.put("failed", failedExec);
+        executions.put("running", runningExec);
+        executions.put("successRate", Math.round(rate * 10.0) / 10.0);
+
+        Map<String, Object> webhooks = new HashMap<>();
+        webhooks.put("total", totalWh);
+        webhooks.put("delivered", deliveredWh);
+        webhooks.put("exhausted", exhaustedWh);
+
+        Map<String, Object> response = new HashMap<>();
+        response.put("jobs", jobs);
+        response.put("executions", executions);
+        response.put("webhooks", webhooks);
+
+        return response;
     }
 
-    /** Per-job stats — cached 10 s, evicted on job updates. */
+    /**
+     * Per-job statistics.
+     */
     @Cacheable(value = "jobStats", key = "#jobId")
     public Map<String, Object> getJobStats(Long jobId) {
-        long total   = executionRepository.countByJobsId(jobId);
-        long success = executionRepository.countByJobsIdAndStatus(jobId, ExecutionStatus.SUCCESS);
-        long failed  = executionRepository.countByJobsIdAndStatus(jobId, ExecutionStatus.FAILED);
-        long running = executionRepository.countByJobsIdAndStatus(jobId, ExecutionStatus.STARTED);
-        double rate  = total > 0 ? (double) success / total * 100 : 0;
 
-        return Map.of(
-                "jobId",       jobId,
-                "total",       total,
-                "success",     success,
-                "failed",      failed,
-                "running",     running,
-                "successRate", Math.round(rate * 10.0) / 10.0);
+        long total = executionRepository.countByJobsId(jobId);
+
+        long success = executionRepository.countByJobsIdAndStatus(
+                jobId,
+                ExecutionStatus.SUCCESS
+        );
+
+        long failed = executionRepository.countByJobsIdAndStatus(
+                jobId,
+                ExecutionStatus.FAILED
+        );
+
+        long running = executionRepository.countByJobsIdAndStatus(
+                jobId,
+                ExecutionStatus.STARTED
+        );
+
+        double rate = total > 0
+                ? (double) success / total * 100
+                : 0;
+
+        Map<String, Object> stats = new HashMap<>();
+
+        stats.put("jobId", jobId);
+        stats.put("total", total);
+        stats.put("success", success);
+        stats.put("failed", failed);
+        stats.put("running", running);
+        stats.put("successRate", Math.round(rate * 10.0) / 10.0);
+
+        return stats;
     }
 }
+

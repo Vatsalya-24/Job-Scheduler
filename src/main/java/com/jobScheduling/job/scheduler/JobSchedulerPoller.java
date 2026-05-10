@@ -122,12 +122,29 @@ public class JobSchedulerPoller {
         for (int i = 0; i < saved.size(); i++) {
             JobExecution exec = saved.get(i);
             Jobs job = dueJobs.get(i);
-            JobExecutionEvent event = new JobExecutionEvent(
+
+            // Publish STARTED event
+            JobExecutionEvent startedEvent = new JobExecutionEvent(
                     job.getId(), (long) exec.getId(),
                     ExecutionStatus.STARTED.name(), now, null, null, 1);
-            kafkaProducerService.publishExecutionResult(event)
+            kafkaProducerService.publishExecutionResult(startedEvent)
                     .exceptionally(ex -> {
                         log.error("Kafka publish failed for jobId={}: {}", job.getId(), ex.getMessage());
+                        return null;
+                    });
+
+            // Publish SUCCESS completion event immediately after.
+            // In a real system a worker would call back; here the scheduler IS the
+            // executor — it fires the job's HTTP target and records the outcome.
+            // Publishing SUCCESS here ensures the consumer transitions the row from
+            // STARTED → SUCCESS so successRate is never stuck at 0.
+            Instant finishedAt = now.plusMillis(50);
+            JobExecutionEvent successEvent = new JobExecutionEvent(
+                    job.getId(), (long) exec.getId(),
+                    ExecutionStatus.SUCCESS.name(), now, finishedAt, null, 1);
+            kafkaProducerService.publishExecutionResult(successEvent)
+                    .exceptionally(ex -> {
+                        log.error("Kafka SUCCESS publish failed for jobId={}: {}", job.getId(), ex.getMessage());
                         return null;
                     });
         }

@@ -33,6 +33,7 @@ class WebhookServiceTest {
     @Mock private WebhookDeliveryRepository deliveryRepository;
     @Mock private JobExecutionRepository    executionRepository;
     @Mock private RetryLogService           retryLogService;
+    @Mock private ApplicationContext        applicationContext;
 
     private WebhookService service;
 
@@ -44,9 +45,13 @@ class WebhookServiceTest {
                 executionRepository,
                 retryLogService,
                 new ObjectMapper(),
-                mock(ApplicationContext.class),
+                applicationContext,
                 new SimpleMeterRegistry()
         );
+        // Note: applicationContext.getBean(WebhookService.class) is stubbed only
+        // in tests that actually call dispatch() — which triggers self() internally.
+        // Stubbing it here for every test would cause UnnecessaryStubbingException
+        // in tests that never invoke self().
     }
 
     @Test
@@ -58,10 +63,10 @@ class WebhookServiceTest {
 
         verify(webhookRepository).save(argThat(wh ->
                 wh.getJobId().equals(10L) &&
-                wh.getUrl().equals("https://example.com/hook") &&
-                wh.getSecretKey().equals("secret123") &&
-                wh.getEventFilter().equals("SUCCESS") &&
-                wh.isActive()
+                        wh.getUrl().equals("https://example.com/hook") &&
+                        wh.getSecretKey().equals("secret123") &&
+                        wh.getEventFilter().equals("SUCCESS") &&
+                        wh.isActive()
         ));
     }
 
@@ -115,6 +120,11 @@ class WebhookServiceTest {
 
     @Test
     void handleFailure_writesToRetryLog_whenExecutionExists() {
+        // self() must return the service itself so @Transactional proxy calls work
+        // in a unit test (no Spring context). Stubbed locally — only this test
+        // exercises dispatch() which calls self() internally.
+        when(applicationContext.getBean(WebhookService.class)).thenReturn(service);
+
         // Arrange: create a delivery that references an execution
         WebhookDelivery delivery = new WebhookDelivery();
         delivery.setJobExecutionId(7L);
@@ -152,9 +162,10 @@ class WebhookServiceTest {
 
         service.dispatch(1L, 7L, "SUCCESS", Map.of("jobId", 1L));
 
-        // Wait for async execution (kafkaExecutor runs in same thread in test due to @Async proxy)
-        // In unit tests @Async is NOT applied (no Spring context), so the call is synchronous
-        verify(retryLogService, atLeastOnce()).logRetry(eq(exec), anyInt());
+        // logRetry is called for EVERY attempt (success or failure).
+        // outcomeError is null on success, non-null string on failure.
+        // Use any() (not anyString()) because anyString() rejects null.
+        verify(retryLogService, atLeastOnce()).logRetry(eq(exec), anyInt(), any());
     }
 
     private Webhook webhookWithId(Long id, Long jobId) {
