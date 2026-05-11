@@ -1,7 +1,10 @@
 package com.jobScheduling.job.entity;
 
 import jakarta.persistence.*;
+import lombok.Getter;
+
 import java.sql.Timestamp;
+
 
 /**
  * Records every webhook delivery attempt — success or failure.
@@ -18,6 +21,7 @@ import java.sql.Timestamp;
  *   success        — true if HTTP 2xx received, false otherwise
  *   error_message  — null on success; exception message or "HTTP 503" on failure
  */
+@Getter
 @Entity
 @Table(name = "retry_log", indexes = {
         @Index(name = "idx_retry_log_execution_id", columnList = "execution_id"),
@@ -58,15 +62,13 @@ public class RetryLog {
         this.errorMessage  = errorMessage;
     }
 
-    public Long getId()                        { return id; }
-    public JobExecution getExecutionId()       { return executionId; }
     public void setExecutionId(JobExecution e) { this.executionId = e; }
-    public Integer getAttemptNumber()          { return attemptNumber; }
+
     public void setAttemptNumber(Integer n)    { this.attemptNumber = n; }
-    public Timestamp getFiredAt()              { return firedAt; }
+
     public void setFiredAt(Timestamp t)        { this.firedAt = t; }
-    public boolean isSuccess()                 { return success; }
+
     public void setSuccess(boolean success)    { this.success = success; }
-    public String getErrorMessage()            { return errorMessage; }
+
     public void setErrorMessage(String msg)    { this.errorMessage = msg; }
 }

@@ -26,10 +26,6 @@ import java.util.Map;
  * THE RULE: @Cacheable must only be placed on methods returning plain serialisable
  *   objects — Map, DTO, List, primitives. Never on ResponseEntity, Page<T>, or
  *   any Spring MVC / Spring Data wrapper type.
- *
- * THE FIX: This service caches plain Map<String,Object>. The controller calls
- *   this service and wraps the Map in ResponseEntity AFTER retrieval — the cache
- *   never sees the ResponseEntity.
  */
 @Service
 @Transactional(readOnly = true)

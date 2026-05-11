@@ -13,7 +13,6 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 /**
- * THE BUG: @Cacheable was placed on a method that returns ResponseEntity<Map<...>>.
  *
  * Spring's @Cacheable stores the RETURN VALUE of the method in Redis.
  * The return value was ResponseEntity — a Spring HTTP wrapper that includes
@@ -30,10 +29,7 @@ import java.util.concurrent.TimeUnit;
  * HttpEntity, or any Spring MVC wrapper type. Only cache plain data objects
  * (Map, DTO, List, primitives). Move @Cacheable to a service layer method
  * that returns the plain data, then wrap it in ResponseEntity in the controller.
- *
- * FIX: Extract the data-building logic into private methods that return plain
- * Map<String, Object>. Cache those Maps in a service. Controller wraps the
- * result in ResponseEntity AFTER retrieval — never touched by the cache.
+
  */
 @RestController
 @RequestMapping("/api/v1/dashboard")

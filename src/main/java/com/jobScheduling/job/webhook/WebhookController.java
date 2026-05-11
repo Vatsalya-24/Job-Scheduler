@@ -74,25 +74,3 @@ public class WebhookController {
             @Pattern(regexp = "ALL|STARTED|SUCCESS|FAILED") String eventFilter
     ) {}
 }
-
-// ── Global deliveries endpoint (no jobId scope) ───────────────────────────────
-@RestController
-@RequestMapping("/api/v1/webhooks")
-class WebhookGlobalController {
-
-    private final WebhookDeliveryRepository deliveryRepository;
-
-    WebhookGlobalController(WebhookDeliveryRepository deliveryRepository) {
-        this.deliveryRepository = deliveryRepository;
-    }
-
-    /**
-     * All webhook deliveries across all jobs — used by the dashboard.
-     * Sorted by createdAt DESC so newest appear first.
-     */
-    @GetMapping("/deliveries")
-    public ResponseEntity<Page<WebhookDelivery>> allDeliveries(
-            @PageableDefault(size = 50, sort = "createdAt") Pageable pageable) {
-        return ResponseEntity.ok(deliveryRepository.findAll(pageable));
-    }
-}

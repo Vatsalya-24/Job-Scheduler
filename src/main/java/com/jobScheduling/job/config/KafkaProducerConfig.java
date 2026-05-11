@@ -28,10 +28,7 @@ import java.util.Map;
  *   latency drops from 10–50ms to 1–3ms. linger=1ms instead of 5ms.
  *   This is what allows p(99) async latency < 30ms.
  *
- * ROOT CAUSE 3 FIX: The original config used acks=all + linger=5ms for EVERY
- * producer. Under 2000 req/s this caused each publish to wait for all replicas,
- * and with linger=5ms each batch delayed an extra 5ms. Combined: p(99) blew past
- * 4 seconds. Separating into two producers cuts execution-path latency by ~15x.
+ *
  */
 @Configuration
 public class KafkaProducerConfig {
